@@ -46,7 +46,7 @@ def subrect(img, roi):
     y += h/2
     w = int(w + 0.5)
     h = int(h + 0.5)        
-    return img_as_float(cv2.getRectSubPix(img, (w, h), (x, y)))
+    return cv2.getRectSubPix(img, (w, h), (x, y))
 
 
 def imshow(image):
@@ -58,6 +58,11 @@ def imshow(image):
     ax.axis('off')
     plt.show()
     
+def dist2(p1, p2):
+    return np.sum((np.array(p1) - p2) ** 2)
+
+def dist(p1, p2):
+    return np.sqrt(np.sum((np.array(p1) - p2) ** 2))
     
 def batch_show(batch):
     shape = batch.shape[2:]
@@ -83,18 +88,51 @@ def joint_poselet(img, p1, p2, t):
     x0, x1, y0, y1 = np.round((x0, x1, y0, y1)).astype(int)
     return img[y0:y1, x0:x1]
 
+
+def calc_stats(joints_dict):
+    mean_len = 0.0
+    rel_lengths = np.zeros((len(joints_dict), len(pairs)))
+    i = 0
+    for _, (pts,) in joints_dict.items():
+        rel_lengths[i] = [dist2(pts[v1], pts[v2]) for v1, v2, t in pairs]
+        i += 1
+    rel_lengths = np.sqrt(rel_lengths)
+    rel_lengths = rel_lengths / np.mean(rel_lengths, axis=1)[:, None]
+    return rel_lengths.mean(axis=0), np.sqrt(rel_lengths.var(axis=0))
     
-def extract_poselets(img, pts, shape):
+    
+def extract_poselets(img, pts, shape, stats=None):
     res = []
-    #new_shape = np.array(img.shape)
-    #ext = (new_shape[:2] * extend_k).astype(int)
-    #new_shape[:2] += ext * 2
-    #img_pad = np.zeros(new_shape, dtype=img.dtype)
-    #img_pad[ext[0]:-ext[0], ext[1]:-ext[1]] = img
-    for v1, v2, t in pairs:
-        res.append(cv2.resize(joint_poselet(img, pts[v1], pts[v2], t), shape))
+    dists = np.zeros(len(pairs), np.float32)
+    for i, (v1, v2, t) in enumerate(pairs):
+        dists[i] = dist2(pts[v1], pts[v2])
+    dists = np.sqrt(dists)
+    dists /= dists.mean()
+    mask = [stats is None or abs(dists[i] - stats[0][i]) < stats[1][i] \
+            for i, (v1, v2, t) in enumerate(pairs)]
+    #if np.count_nonzero(mask) != len(mask):
+        #return None
+    for i, (v1, v2, t) in enumerate(pairs):
+        if mask[i]:
+            res.append(cv2.resize(joint_poselet(img, pts[v1], pts[v2], t), shape))
+        else:
+            res.append(np.zeros(shape + img.shape[2:], dtype=img.dtype))
     #batch_show(np.array([res]))
     return res        
+    
+    
+def symm_vert(x):
+    not_list = False
+    if type(x) != list:
+        x = [x]
+        not_list = True
+    res = []
+    for img in x:
+        if img is None:
+            res.append(None)
+        else:
+            res.append(img[:, ::-1])
+    return res[0] if not_list else res
     
     
 def load_data_atr(datadir, shape, n_attr, n_classes):
@@ -105,6 +143,7 @@ def load_data_atr(datadir, shape, n_attr, n_classes):
     f = open(path.join(datadir, 'annotation.json'), 'r')
     joints_dict = json.load(f)
     f.close()
+    stats = calc_stats(joints_dict)
     n = len(rows)
     x, y = list(), list()
     for i, row in enumerate(rows):
@@ -123,14 +162,24 @@ def load_data_atr(datadir, shape, n_attr, n_classes):
             subimg2 = cv2.resize(subrect(img, (roi[0], roi[1] + roi[3] / 2, roi[2], roi[3] / 2)), shape)
             x.append([subimg1, subimg2])
         elif True:
+            subimg = cv2.resize(subrect(img, roi), shape)
             joints = joints_dict[fields[0]][0]
-            x.append(extract_poselets(img, joints, shape))
-            
-        y.append(list(map(float, fields[5:])))
-    y = np.array(y, dtype=int) + 1
-    yp = np.zeros((len(y), n_attr, n_classes), dtype=np.float32)
-    yp[np.arange(len(y)), y] = 1
-    xy = dataset(np.array(x), y.astype(np.float32), yp)
+            x.append([subimg] + extract_poselets(img, joints, shape, stats=stats))
+        if x[-1] is None:
+            x.pop()
+            print('pop %s' % fields[0])
+        else:
+            y.append(list(map(float, fields[5:])))
+            x.append(symm_vert(x[-1]))
+            y.append(y[-1])
+        
+    y = np.array(y, dtype=np.int8) + 1
+    yp = np.zeros((len(y) * n_attr, n_classes), dtype=np.float32)
+    yp[np.arange(len(y) * n_attr), y.ravel()] = 1
+    from sys import getsizeof
+    print(getsizeof(x))
+    xy = dataset(np.array(x, dtype=x[0][0].dtype), y, yp.reshape((len(y), n_attr, n_classes)))
+    print(getsizeof(xy.x), xy.x.shape, xy.x.dtype)
     return xy
 
 def draw_joints(img, pts):
@@ -143,9 +192,15 @@ def draw_joints(img, pts):
         for i in range(len(r)):
             img[r[i], c[i]] = clr * v[i] + img[r[i], c[i]] * (1. - v[i])
     return img
-    
+
+
+def cvt(img):
+    if img.dtype == np.uint8:
+        return img.astype(np.float32) / 255
+
+
 class AttributesDataset:
-    def __init__(self, datadir, shape, n_attr):
+    def __init__(self, datadir, shape, n_attr, n_classes):
         self.train = load_data_atr(path.join(datadir, 'train'), shape, n_attr, n_classes)
         self.test = load_data_atr(path.join(datadir, 'test'), shape, n_attr, n_classes)
         self.order = np.arange(len(self.train.x))
@@ -155,10 +210,11 @@ class AttributesDataset:
         assert(batch_size <= len(self.train.x))
         if self.offset + batch_size <= len(self.train.x):
             self.offset += batch_size
-            return self.train.x[self.order[self.offset - batch_size:self.offset]], \
-                    self.train.y[self.order[self.offset - batch_size:self.offset]]
+            return cvt(self.train.x[self.order[self.offset - batch_size:self.offset]]), \
+                    self.train.y[self.order[self.offset - batch_size:self.offset]], \
+                    self.train.yp[self.order[self.offset - batch_size:self.offset]]
         p = self.order[self.offset:]
         self.order = np.random.permutation(len(self.train.x))
         self.offset += batch_size - len(self.train.x)
         p = np.hstack((p, self.order[:self.offset]))
-        return self.train.x[p], self.train.y[p]
+        return cvt(self.train.x[p]), self.train.y[p], self.train.yp[p]
