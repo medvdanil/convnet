@@ -78,6 +78,19 @@ def conv_net(X, conv_layers, dropout):
     w = tf.Variable(tf.truncated_normal([fc2_size, n_attr], stddev=dev))
     b = tf.Variable(tf.constant(dev, shape=[n_attr]))
     return tf.add(tf.matmul(dense2, w), b), dense1, dense2
+    """
+    outs = []
+    for i in range(n_attr):
+        w = tf.Variable(tf.truncated_normal([dense1.get_shape().as_list()[1], fc2_size], stddev=dev))
+        b = tf.Variable(tf.constant(dev, shape=[fc2_size]))
+        dense2 = tf.nn.relu(tf.add(tf.matmul(dense1, w), b))
+        dense2 = tf.nn.dropout(dense2, dropout)
+        w = tf.Variable(tf.truncated_normal([fc2_size, 1], stddev=dev))
+        b = tf.Variable(tf.constant(dev, shape=[1]))
+        out = tf.add(tf.matmul(dense2, w), b)
+        outs.append(out)
+    return tf.reshape(tf.concat(axis=1, values=outs), [-1, n_attr])
+    """
 
 #64 -> 60 -> 30 -> 26 -> 13 -> 11 -> 6 -> 2 -> fc_576
 conv_layers = [
@@ -101,7 +114,7 @@ y = tf.placeholder(tf.float32, [None, n_attr])
 keep_prob = tf.placeholder(tf.float32) #dropout (keep probability)
 
 # Construct model
-pred0, d1, d2 = conv_net(x, conv_layers, keep_prob)
+pred0 = conv_net(x, conv_layers, keep_prob)
 
 # Define loss and optimizer
 cost = tf.reduce_mean(tf.multiply(tf.nn.sigmoid_cross_entropy_with_logits(logits=pred0, labels=y), 
@@ -243,7 +256,6 @@ if False:
 else:
     test(0, learning_rate=learning_rate)
 
-#best 0.568889
-#     0.584444
-# 50.62 with0.5, skel
-# 53.89 - with0.5, full roi 
+#mAP:
+#skel_3*9   0.6540
+#9_0.05     0.6
