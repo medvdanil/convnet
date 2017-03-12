@@ -26,7 +26,8 @@ batch_size = 16
 display_step = 10
 test_step = 300
 # Network Parameters
-img_shape = 64, 64, 3
+#img_shape = 64, 64, 3
+img_shape = 224, 224, 3
 n_attr = 9
 dropout = 0.75
 
@@ -42,7 +43,7 @@ def one_poselet(X, conv_layers, dropout):
     # Reshape input picture
     d_in = img_shape[2] if len(img_shape) > 2 else 1
     data_in = X
-    #print("shape_in =", data_in.get_shape().as_list())
+    print("shape_in =", data_in.get_shape().as_list())
     for r, c, d_out in conv_layers:
         w = tf.Variable(tf.truncated_normal([r, c, d_in, d_out], stddev=dev))
         b = tf.Variable(tf.constant(dev, shape=[d_out]))
@@ -52,7 +53,7 @@ def one_poselet(X, conv_layers, dropout):
         conv = tf.nn.dropout(conv, dropout)
         d_in = d_out
         data_in = conv
-        #print("shape =", data_in.get_shape().as_list())
+        print("shape after conv%dx%d =" % (r, c), data_in.get_shape().as_list())
 
     # Fully connected layer
     fc_size = 576
@@ -77,7 +78,7 @@ def conv_net(X, conv_layers, dropout):
     dense2 = tf.nn.dropout(dense2, dropout)
     w = tf.Variable(tf.truncated_normal([fc2_size, n_attr], stddev=dev))
     b = tf.Variable(tf.constant(dev, shape=[n_attr]))
-    return tf.add(tf.matmul(dense2, w), b), dense1, dense2
+    return tf.add(tf.matmul(dense2, w), b) #, dense1, dense2
     """
     outs = []
     for i in range(n_attr):
@@ -238,6 +239,7 @@ def test(step_i, learning_rate=None):
             tmp.append(v.value().eval())
         joblib.dump(tmp, "tmp.dump", compress=9)
         mAP = test_and_calc_mAP(sess, data.test)
+        print("Test mAP:", mAP)
         """
         print('pred0\n',sess.run(pred0, feed_dict={x: data.test.x[0:4], keep_prob: 1. }))
         print('d1\n',sess.run(d1, feed_dict={x: data.test.x[0:4], keep_prob: 1. }))
