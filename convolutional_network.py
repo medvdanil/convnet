@@ -21,8 +21,9 @@ dataset_dir = '/files/data/attributes_dataset/'
 # Parameters
 learning_rate = 1e-4 * 5
 weight_decay = 0.0005
-training_iters = 20000
+training_iters = 200000
 batch_size = 16
+test_step = 300
 display_step = 10
 
 # Network Parameters
@@ -31,7 +32,7 @@ n_attr = 9
 n_classes = 3
 dropout = 0.75
 
-dev = 0.4
+dev = 0.05
     
     
 
@@ -122,6 +123,31 @@ learning_rate_l = 0.0001
 learning_rate_r = 0.1
 steps = 100
 
+def test_and_calc_mAP(sess, xy):
+    test_batch_size = 100
+    print("Testing..", end='')
+    res_pred = np.zeros((0, n_attr, n_classes), dtype=np.float32)
+    for i in range(0, len(xy.x), test_batch_size):
+        n = min(test_batch_size, len(xy.x) - i)
+        res_pred = np.concatenate((res_pred, sess.run(pred, feed_dict={ \
+                                    x: xy.x[i:i+n], keep_prob: 1. \
+                                    })))
+        print('.' if i * 70 // len(xy.x) > \
+                    (i - test_batch_size) * 70 // len(xy.x) else '', end='')
+        sys.stdout.flush()
+    print('\n')
+    res_pred.dump("res_pred.dump")
+    mAP = 0.0
+    labels = data.test.y - 1
+    for i in range(n_attr):
+        msk = labels[:, i] != 0
+        p_i = average_precision_score(labels[msk, i], res_pred[msk, i, 2] - res_pred[msk, i, 0])
+        print("%dth attr: %.2f%%" % (i+1, p_i * 100))
+        mAP += p_i
+    mAP /= n_attr
+    return mAP
+
+        
 def test(step_i, learning_rate=None):  
     m = np.power(learning_rate_r / learning_rate_l, 1.0 / steps)
     lr = learning_rate_l * np.power(m, step_i)
@@ -143,7 +169,9 @@ def test(step_i, learning_rate=None):
     # Launch the graph
     plt_y = []
     plt_acc = []
-    plt_x = []
+    plt_acc_tr = []
+    plt_it1 = []
+    plt_it2 = []
     with tf.Session() as sess:
         sess.run(init)
         np.random.seed((hash(sess) + hash(np) + hash(monotonic())) % 2**16)
@@ -186,49 +214,31 @@ def test(step_i, learning_rate=None):
                     loss = sess.run(cost, feed_dict={x: batch_xs, yp: batch_yps, keep_prob: 1.})
                     print("[%.1fs] Iter " % (monotonic() - tk) + str(step*batch_size) + \
                         ", Minibatch Loss= " + "{:.6f}".format(loss) + ", Training Accuracy= " + "{:.5f}".format(acc))
-                    res_pr = sess.run(pred, feed_dict={ \
-                                      x: batch_xs, keep_prob: 1. \
-                                      })
-                    print("batch:\n", res_pr)
                     plt_y.append(loss)
-                    plt_acc.append(acc)
-                    plt_x.append(step*batch_size)
-                    #res = sess.run(pred, feed_dict={x: batch_xs, y: batch_ys, keep_prob: 1.}); print(res)
+                    plt_it1.append(step*batch_size)
+                if step % test_step == 0:
+                    mAP = test_and_calc_mAP(sess, data.test)
+                    print("Test mAP:", mAP)
+                    mAP_tr = test_and_calc_mAP(sess, data.train)
+                    print("Train mAP:", mAP_tr)
+                    plt_acc.append(mAP)
+                    plt_acc_tr.append(mAP_tr)
+                    plt_it2.append(step*batch_size)
                 step += 1
         except KeyboardInterrupt:
             print("Interrupted")
-        #plt.plot(plt_x, plt_y)
-        #plt.show()
-        #plt.plot(plt_x, plt_acc)
-        #plt.show()
+        plt.plot(plt_it1, plt_y)
+        plt.show()
+        plt.plot(plt_it2, plt_acc)
+        plt.show()
+        plt.plot(plt_it2, plt_acc_tr)
+        plt.show()
         print("Optimization Finished!")
         tmp = []
         for v in tf.global_variables():
             tmp.append(v.value().eval())
         joblib.dump(tmp, "tmp.dump", compress=9)
-        test_batch_size = 100
-        print("Testing..", end='')
-        res_pred = np.zeros((0, n_attr, n_classes), dtype=np.float32)
-        data.test = data.train
-        for i in range(0, len(data.test.x), test_batch_size):
-            n = min(test_batch_size, len(data.test.x) - i)
-            res_pred = np.concatenate((res_pred, sess.run(pred, feed_dict={ \
-                                      x: data.test.x[i:i+n], keep_prob: 1. \
-                                      })))
-            print('.' if i * 70 // len(data.test.x) > \
-                        (i - test_batch_size) * 70 // len(data.test.x) else '', end='')
-            sys.stdout.flush()
-        print('\n')
-        res_pred.dump("res_pred.dump")
-        mAP = 0.0
-        labels = data.test.y - 1
-        for i in range(n_attr):
-            msk = labels[:, i] != 0
-            p_i = average_precision_score(labels[msk, i], res_pred[msk, i, 2] - res_pred[msk, i, 0])
-            print("%dth attr: %.2f%%" % (i+1, p_i * 100))
-            mAP += p_i
-        mAP /= n_attr
-        
+        mAP = test_and_calc_mAP(sess, data.test)
         print("Testing Accuracy:", mAP)
         
         #print(result)

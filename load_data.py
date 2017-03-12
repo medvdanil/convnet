@@ -135,7 +135,7 @@ def symm_vert(x):
     return res[0] if not_list else res
     
     
-def load_data_atr(datadir, shape, n_attr, n_classes):
+def load_data_atr(datadir, shape, n_attr, n_classes, is_test=False):
     f = open(path.join(datadir, 'labels.txt'), 'r')
     rows = f.readlines()
     f.close()
@@ -154,14 +154,14 @@ def load_data_atr(datadir, shape, n_attr, n_classes):
         roi = list(map(float, fields[1:5]))
         if roi[0] != roi[0]:
             continue
-        if False:
+        if True:
             subimg = cv2.resize(subrect(img, roi), shape)
             x.append([subimg])
         elif False:
             subimg1 = cv2.resize(subrect(img, (roi[0], roi[1], roi[2], roi[3] / 2)), shape)
             subimg2 = cv2.resize(subrect(img, (roi[0], roi[1] + roi[3] / 2, roi[2], roi[3] / 2)), shape)
             x.append([subimg1, subimg2])
-        elif True:
+        elif False:
             subimg = cv2.resize(subrect(img, roi), shape)
             joints = joints_dict[fields[0]][0]
             x.append([subimg] + extract_poselets(img, joints, shape, stats=stats))
@@ -170,8 +170,9 @@ def load_data_atr(datadir, shape, n_attr, n_classes):
             print('pop %s' % fields[0])
         else:
             y.append(list(map(float, fields[5:])))
-            x.append(symm_vert(x[-1]))
-            y.append(y[-1])
+            if not is_test:
+                x.append(symm_vert(x[-1]))
+                y.append(y[-1])
         
     y = np.array(y, dtype=np.int8) + 1
     yp = np.zeros((len(y) * n_attr, n_classes), dtype=np.float32)
@@ -202,7 +203,7 @@ def cvt(img):
 class AttributesDataset:
     def __init__(self, datadir, shape, n_attr, n_classes):
         self.train = load_data_atr(path.join(datadir, 'train'), shape, n_attr, n_classes)
-        self.test = load_data_atr(path.join(datadir, 'test'), shape, n_attr, n_classes)
+        self.test = load_data_atr(path.join(datadir, 'test'), shape, n_attr, n_classes, is_test=True)
         self.order = np.arange(len(self.train.x))
         self.offset = len(self.train.x)
     
