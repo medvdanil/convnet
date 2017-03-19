@@ -18,66 +18,83 @@ from sklearn.metrics import average_precision_score
 import sys
 
 dataset_dir = '/files/data/attributes_dataset/'
+vgg_weights_filename = '/files/data/pretrain_model/vgg16_weights.npz'
 # Parameters
-learning_rate = 1e-4 * 5
-weight_decay = 0.0005
-training_iters = 400000
+learning_rate = 1e-5 * 5
+weight_decay = 1e-2 * 3
+training_iters = 250000
 batch_size = 16
 display_step = 10
-test_step = 300
+test_step = 900
 # Network Parameters
 #img_shape = 64, 64, 3
 img_shape = 224, 224, 3
 n_attr = 9
-dropout = 0.75
+dropout = 0.50
+pretrain_batch = 10
 
-dev = 0.05
+dev = 0.01
 np.random.seed((hash(np) + hash(monotonic())) % 2**16)
     
     
-
 def max_pool(img, k):
     return tf.nn.max_pool(img, ksize=[1, k, k, 1], strides=[1, k, k, 1], padding='SAME')
 
-def one_poselet(X, conv_layers, dropout):
-    # Reshape input picture
-    d_in = img_shape[2] if len(img_shape) > 2 else 1
-    data_in = X
-    print("shape_in =", data_in.get_shape().as_list())
-    for r, c, d_out in conv_layers:
-        w = tf.Variable(tf.truncated_normal([r, c, d_in, d_out], stddev=dev))
-        b = tf.Variable(tf.constant(dev, shape=[d_out]))
-        conv = tf.nn.conv2d(data_in, w, strides=[1, 1, 1, 1], padding='VALID')
-        conv = tf.nn.relu(tf.nn.bias_add(conv, b))
-        conv = max_pool(conv, 2)
-        conv = tf.nn.dropout(conv, dropout)
-        d_in = d_out
-        data_in = conv
-        print("shape after conv%dx%d =" % (r, c), data_in.get_shape().as_list())
 
+# poselet_id==None means common pretrained layers
+def convolitions(data_in, conv_layers, poselet_id):
+    print("shape_in =", data_in.get_shape().as_list())
+    d_in = data_in.get_shape().as_list()[3:]
+    d_in = 1 if len(d_in) == 0 else d_in[0]
+    for conv_block in conv_layers:
+        for j, (i, r, c, d_out) in enumerate(conv_block):
+            w = tf.get_variable("conv%d_%d_W_%s" % (i, j + 1, str(poselet_id)),
+                                shape=[r, c, d_in, d_out],
+                                initializer=tf.truncated_normal_initializer(stddev=dev),
+                                trainable=poselet_id is not None)
+            b = tf.get_variable("conv%d_%d_b_%s" % (i, j + 1, str(poselet_id)),
+                                shape=[d_out],
+                                initializer=tf.constant_initializer(dev),
+                                trainable=poselet_id is not None)
+            conv = tf.nn.conv2d(data_in, w, strides=[1, 1, 1, 1], padding='SAME')
+            conv = tf.nn.relu(tf.nn.bias_add(conv, b))
+            d_in = d_out
+            data_in = conv
+        data_in = max_pool(data_in, 2)    
+        print("mp shape =", data_in.get_shape().as_list())
+    return data_in
+
+
+def one_poselet(X, conv_layers, poselet_id):
+    # Reshape input picture
+    data_in = convolitions(X, conv_layers, poselet_id)
     # Fully connected layer
-    fc_size = 576
+    fc_size = 224 #576
     data_size = np.prod(data_in.get_shape().as_list()[1:])
-    w = tf.Variable(tf.truncated_normal([data_size, fc_size], stddev=dev))
-    b = tf.Variable(tf.constant(dev, shape=[fc_size]))
+    w = tf.Variable(tf.truncated_normal([data_size, fc_size], stddev=dev),\
+            name="fc1_W_%d" % poselet_id)
+    b = tf.Variable(tf.constant(dev, shape=[fc_size]),\
+            name="fc1_b_%d" % poselet_id)
     dense1 = tf.reshape(data_in, [-1, data_size])
     dense1 = tf.nn.relu(tf.add(tf.matmul(dense1, w), b))
-    dense1 = tf.nn.dropout(dense1, dropout)
     return dense1
     
-def conv_net(X, conv_layers, dropout):
+
+def conv_net(X, conv_layers):
     fc_poselets = []
     for i in range(X.get_shape().as_list()[1]):
-        fc_poselets.append(one_poselet(X[:,i,...], conv_layers, dropout))
+        fc_poselets.append(one_poselet(X[:,i,...], conv_layers, i))
     dense1 = tf.concat(axis=1, values=fc_poselets)
     
+    
     fc2_size = 128
-    w = tf.Variable(tf.truncated_normal([dense1.get_shape().as_list()[1], fc2_size], stddev=dev))
-    b = tf.Variable(tf.constant(dev, shape=[fc2_size]))
+    w = tf.Variable(tf.truncated_normal([dense1.get_shape().as_list()[1], fc2_size], \
+        stddev=dev), name="fc2_W")
+    b = tf.Variable(tf.constant(dev, shape=[fc2_size]), name="fc2_b")
     dense2 = tf.nn.relu(tf.add(tf.matmul(dense1, w), b))
-    dense2 = tf.nn.dropout(dense2, dropout)
-    w = tf.Variable(tf.truncated_normal([fc2_size, n_attr], stddev=dev))
-    b = tf.Variable(tf.constant(dev, shape=[n_attr]))
+    dense2 = tf.nn.dropout(dense2, keep_prob)
+    w = tf.Variable(tf.truncated_normal([fc2_size, n_attr], stddev=dev), name="fc3_W")
+    b = tf.Variable(tf.constant(dev, shape=[n_attr]), name="fc3_b")
     return tf.add(tf.matmul(dense2, w), b) #, dense1, dense2
     """
     outs = []
@@ -94,57 +111,108 @@ def conv_net(X, conv_layers, dropout):
     """
 
 #64 -> 60 -> 30 -> 26 -> 13 -> 11 -> 6 -> 2 -> fc_576
+pretrained_conv_layers = [
+    [ [1, 3, 3, 64],
+      [1, 3, 3, 64] ],
+    #maxpooling
+    [ [2, 3, 3, 128],
+      [2, 3, 3, 128] ],
+    #maxpooling
+    [ [3, 3, 3, 256],
+      [3, 3, 3, 256],
+      [3, 3, 3, 256]]
+    #maxpooling
+]
+
 conv_layers = [
-    [5, 5, 64],
-    [5, 5, 64],
-    [3, 3, 64],
-    [3, 3, 64]
+    [ [4, 3, 3, 64] ], 
+    [ [5, 3, 3, 64] ], 
 ]
 
 #Load data
 try:
-    data = joblib.load('data.dump')
+    data = huge_load('data.dump')
 except:
     data = AttributesDataset(dataset_dir, img_shape[:2], n_attr)
-    joblib.dump(data, 'data.dump', compress=9)
+    huge_dump(data, 'data.dump')
+x = tf.placeholder(tf.float32, [None, *data.train.x[0].shape])
+y = tf.placeholder(tf.float32, [None, n_attr])
+
+data.train = dataset(None, data.train.y)
+data.test = dataset(None, data.test.y)
+
 print("Dataset:")
 print("%d train examples, %d test" % (len(data.train.y), len(data.test.y)))  
 # tf Graph input
-x = tf.placeholder(tf.float32, [None, *data.train.x[0].shape])
-y = tf.placeholder(tf.float32, [None, n_attr])
 keep_prob = tf.placeholder(tf.float32) #dropout (keep probability)
+rgb_subt = tf.constant([123.68, 116.779, 103.939], dtype=tf.float32, \
+                        shape=[1, 1, 1, 3], name='rgb_subt')
+        
+
+vggw = np.load(vgg_weights_filename)
+print("vgg weights loaded")
+
+X = tf.subtract(x, rgb_subt)
+x_poselets = []
+assigned = []
+with tf.variable_scope("preconv", reuse=None):
+    for i in range(X.get_shape().as_list()[1]):
+        x_poselets.append(tf.expand_dims( \
+            convolitions(X[:,i,...], pretrained_conv_layers, None), 1))
+with tf.variable_scope("preconv", reuse=True):
+    for conv_block in pretrained_conv_layers:
+        for j, (i, r, c, d_out) in enumerate(conv_block):
+            name = "conv%d_%d" % (i, j + 1)
+            asg_b = tf.get_variable(name + '_b_%s' % str(None)).assign(vggw[name + '_b'])
+            asg_W = tf.get_variable(name + '_W_%s' % str(None)).assign(vggw[name + '_W'])
+            assigned += [asg_b, asg_W]
+
+pre_conv = tf.concat(axis=1, values=x_poselets)
+print("pre_conv shape: ", pre_conv.get_shape().as_list())
+
+
+px = tf.placeholder(tf.float32, pre_conv.get_shape().as_list())
 
 # Construct model
-pred0 = conv_net(x, conv_layers, keep_prob)
+pred0 = conv_net(px, conv_layers)
 
 # Define loss and optimizer
-cost = tf.reduce_mean(tf.multiply(tf.nn.sigmoid_cross_entropy_with_logits(logits=pred0, labels=y), 
-                                  tf.cast(tf.not_equal(y, 0.5), tf.float32)))
-# L2 loss
-print("trainable_variables:", len(tf.trainable_variables()))
-l2_loss = tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables()])
-#cost += weight_decay * l2_loss
+cost = tf.reduce_mean(tf.multiply(tf.nn.sigmoid_cross_entropy_with_logits(\
+            logits=pred0, labels=y),\
+        tf.cast(tf.not_equal(y, 0.5), tf.float32)))
+
+# cost += wd * l2)loss
+print("trainable_variables:", [v.name for v in tf.trainable_variables()])
 
 pred = tf.nn.sigmoid(pred0)
 from scipy.optimize import minimize_scalar
 
 learning_rate_l = 0.0001
 learning_rate_r = 0.1
+
+wd_l = 1e-3
+wd_r = 1
 steps = 100
 
-def test_and_calc_mAP(sess, xy):
-    test_batch_size = 100
-    print("Testing..", end='')
-    res_pred = np.zeros((0, n_attr), dtype=np.float32)
-    for i in range(0, len(xy.x), test_batch_size):
-        n = min(test_batch_size, len(xy.x) - i)
-        res_pred = np.concatenate((res_pred, sess.run(pred, feed_dict={ \
-                                    x: xy.x[i:i+n], keep_prob: 1. \
-                                    })))
-        print('.' if i * 70 // len(xy.x) > \
-                    (i - test_batch_size) * 70 // len(xy.x) else '', end='')
+
+trainable = tf.trainable_variables()
+
+def apply_on_all_data(sess, graph, ph, data, batch_size=10):
+    res = np.zeros((len(data),) + tuple(graph.get_shape().as_list()[1:]), dtype=np.float32)
+    for i in range(0, len(data), batch_size):
+        n = min(batch_size, len(data) - i)
+        res[i:i+n] = sess.run(graph, feed_dict={ ph: data[i:i+n], keep_prob: 1. })
+        print('.' if i * 70 // len(data) > \
+                    (i - batch_size) * 70 // len(data) else '', end='')
         sys.stdout.flush()
     print('\n')
+    return res
+    
+
+    
+def test_and_calc_mAP(sess, xy, d):
+    print("Testing..", end='')
+    res_pred = apply_on_all_data(sess, pred, px, d)
     res_pred.dump("res_pred.dump")
     mAP = 0.0
     labels = xy.y
@@ -157,20 +225,24 @@ def test_and_calc_mAP(sess, xy):
     return mAP
 
 
-def test(step_i, learning_rate=None):  
-    m = np.power(learning_rate_r / learning_rate_l, 1.0 / steps)
-    lr = learning_rate_l * np.power(m, step_i)
-    if learning_rate is not None:
-        lr = learning_rate
-    print("lr =", lr)
-    optimizer = tf.train.AdamOptimizer(lr).minimize(cost)
+precalc_train = huge_load('precalc_train.dump')
+precalc_test = huge_load('precalc_test.dump')
+
+def test(step_i):  
+    m = np.power(wd_r / wd_l, 1.0 / steps)
+    val = wd_l * np.power(m, step_i)
+    wd = weight_decay
+    #if learning_rate is not None:
+    lr = learning_rate
+    print("lr =", lr, "wd =", wd)
+    # L2 loss
+    l2_loss = tf.add_n([tf.nn.l2_loss(v) for v in tf.trainable_variables()])
+    optimizer = tf.train.AdamOptimizer(lr).minimize(cost +  wd * l2_loss, var_list=trainable)
 
     #Softmax 
 
     print("Init all")
     # Initializing the variables
-    init = tf.global_variables_initializer()
-
     res_acc = 0
     # Launch the graph
     plt_y = []
@@ -179,17 +251,35 @@ def test(step_i, learning_rate=None):
     plt_it1 = []
     plt_it2 = []
     with tf.Session() as sess:
-        sess.run(init)
+        print("Glob init.")
+        sess.run(tf.global_variables_initializer())
+        print("Assign pretrained.")
+        for asg in assigned:
+            sess.run(asg)
+        print("Session started.")
         step = 1
-        #p = sess.run(pred0, feed_dict={x: data.test.x[:100], y: data.test.y[:100, :n_attr], keep_prob: 1.}).ravel()
-        #print(data.test.y[:100, :n_attr].ravel(), '\n', p)
-        #print(sess.run(pred, feed_dict={x: data.test.x[:100], y: data.test.y[:100, :n_attr], keep_prob: 1.}).ravel())
-        
+        """
+        try:
+            precalc_train = huge_load('precalc_train.dump')
+        except:
+            precalc_train = apply_on_all_data(sess, pre_conv, x, 
+                                            data.train.x, batch_size=pretrain_batch)
+            huge_dump(precalc_train, 'precalc_train.dump')
+        try:
+            precalc_test = huge_load('precalc_test.dump')
+        except:
+            precalc_test = apply_on_all_data(sess, pre_conv, x, 
+                                            data.test.x, batch_size=pretrain_batch)
+            huge_dump(precalc_test, 'precalc_test.dump')
+        """
+        bg = BatchGenerator(precalc_train, data.train.y)
+        #for i in range(x.get_shape().as_list()[1]):
+        #    print("pre_conv shape: ", pre_conv.get_shape().as_list())
         
         tk = monotonic()
         try:
             while step * batch_size < training_iters:
-                batch_xs, batch_ys = data.next_batch(batch_size)
+                batch_xs, batch_ys = bg.next_batch(batch_size)
                 #for i in range(len(batch_xs)):
                 #    print(batch_ys[i])
                 #batch_show(batch_xs)
@@ -201,10 +291,10 @@ def test(step_i, learning_rate=None):
                 print(summ)
                 """
                 # Fit training using batch data
-                sess.run(optimizer, feed_dict={x: batch_xs, y: batch_ys,
+                sess.run(optimizer, feed_dict={px: batch_xs, y: batch_ys,
                                                keep_prob: dropout})
                 if step % display_step == 0:
-                    loss = sess.run(cost, feed_dict={x: batch_xs, y: batch_ys, keep_prob: 1.})
+                    loss = sess.run(cost, feed_dict={px: batch_xs, y: batch_ys, keep_prob: 1.})
                     print("[%.1fs] Iter " % (monotonic() - tk) + str(step*batch_size) + \
                         ", Minibatch Loss= " + "{:.6f}".format(loss))
                     """
@@ -217,9 +307,9 @@ def test(step_i, learning_rate=None):
                     plt_it1.append(step*batch_size)
                     
                 if step % test_step == 0:
-                    mAP = test_and_calc_mAP(sess, data.test)
+                    mAP = test_and_calc_mAP(sess, data.test, precalc_test)
                     print("Test mAP:", mAP)
-                    mAP_tr = test_and_calc_mAP(sess, data.train)
+                    mAP_tr = test_and_calc_mAP(sess, data.train, precalc_train)
                     print("Train mAP:", mAP_tr)
                     plt_acc.append(mAP)
                     plt_acc_tr.append(mAP_tr)
@@ -227,18 +317,20 @@ def test(step_i, learning_rate=None):
                 step += 1
         except KeyboardInterrupt:
             print("Interrupted")
+        
         plt.plot(plt_it1, plt_y)
         plt.show()
         plt.plot(plt_it2, plt_acc)
         plt.show()
         plt.plot(plt_it2, plt_acc_tr)
         plt.show()
+        
         print("Optimization Finished!")
         tmp = []
         for v in tf.global_variables():
             tmp.append(v.value().eval())
-        joblib.dump(tmp, "tmp.dump", compress=9)
-        mAP = test_and_calc_mAP(sess, data.test)
+        huge_dump(tmp, "tmp.dump")
+        mAP = test_and_calc_mAP(sess, data.test, precalc_test)
         print("Test mAP:", mAP)
         """
         print('pred0\n',sess.run(pred0, feed_dict={x: data.test.x[0:4], keep_prob: 1. }))
@@ -246,7 +338,7 @@ def test(step_i, learning_rate=None):
         print('d2\n',sess.run(d2, feed_dict={x: data.test.x[0:4], keep_prob: 1. }))
         """
         #print(result)
-        #print(data.test.y[:test_batch_size])
+        #print(data.test.y[:batch_size])
         
     return -mAP
 
@@ -256,8 +348,11 @@ if False:
                                 options={'xatol':0.3})
     print("result:", opt_res.x)
 else:
-    test(0, learning_rate=learning_rate)
-
+    test(0)
+#Test mAP: 0.766681925364
+#lr = 5e-05 wd = 0.0714664099481
+# 0.730441004053
+# 0.76?
 #mAP:
 #skel_3*9   0.6540
 #9_0.05     0.6

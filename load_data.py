@@ -7,6 +7,7 @@ from collections import namedtuple
 from matplotlib import pyplot as plt
 from skimage.draw import line_aa, circle_perimeter_aa
 import json
+import pickle
 
 dataset = namedtuple('dataset', ('x', 'y'))
 widths = [
@@ -34,6 +35,18 @@ pairs = np.array([
 
 extend_k = 0.1
 
+def huge_dump(obj, filename):
+    #joblib.dump(obj, filename, compress=9)
+    f = open(filename, 'wb')
+    pickle.dump(obj, f, protocol=4)
+    f.close()
+    
+    
+def huge_load(filename):
+    with open(filename, 'rb') as f:
+        return pickle.load(f)
+    
+    
 def imread(filename):
     img = cv2.imread(filename)
     if img is None:
@@ -202,17 +215,23 @@ class AttributesDataset:
     def __init__(self, datadir, shape, n_attr):
         self.train = load_data_atr(path.join(datadir, 'train'), shape, n_attr)
         self.test = load_data_atr(path.join(datadir, 'test'), shape, n_attr, is_test=True)
-        self.order = np.arange(len(self.train.x))
-        self.offset = len(self.train.x)
+
+
+class BatchGenerator:
+    def __init__(self, data, labels):
+        self.data = data
+        self.labels = labels
+        self.order = np.arange(len(self.data))
+        self.offset = len(self.data)
     
     def next_batch(self, batch_size):
-        assert(batch_size <= len(self.train.x))
-        if self.offset + batch_size <= len(self.train.x):
+        assert(batch_size <= len(self.data))
+        if self.offset + batch_size <= len(self.data):
             self.offset += batch_size
-            return cvt(self.train.x[self.order[self.offset - batch_size:self.offset]]), \
-                    self.train.y[self.order[self.offset - batch_size:self.offset]]
+            return  self.data[self.order[self.offset - batch_size:self.offset]], \
+                    self.labels[self.order[self.offset - batch_size:self.offset]]
         p = self.order[self.offset:]
-        self.order = np.random.permutation(len(self.train.x))
-        self.offset += batch_size - len(self.train.x)
+        self.order = np.random.permutation(len(self.data))
+        self.offset += batch_size - len(self.data)
         p = np.hstack((p, self.order[:self.offset]))
-        return cvt(self.train.x[p]), self.train.y[p]
+        return self.data[p], self.labels[p]
