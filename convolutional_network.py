@@ -16,13 +16,29 @@ from time import monotonic
 from matplotlib import pyplot as plt
 from sklearn.metrics import average_precision_score  
 import sys
+from os import path
 
+
+train_poselet_id = None
+n_poselets = None
+
+if len(sys.argv) > 1:
+    train_poselet_id = int(sys.argv[1])
+if train_poselet_id < 0:
+    n_poselets = -train_poselet_id
+    train_poselet_id = None
+    
 dataset_dir = '/files/data/attributes_dataset/'
 vgg_weights_filename = '/files/data/pretrain_model/vgg16_weights.npz'
+precalc_fc_pattern = 'precalc_fc%d.dump'
 # Parameters
-learning_rate = 1e-5 * 5
-weight_decay = 1e-2 * 3
-training_iters = 250000
+if train_poselet_id is None:
+    learning_rate = 1e-5 * 1
+    weight_decay = 1e-2 * 6
+else:
+    learning_rate = 1e-5 * 5
+    weight_decay = 1e-2 * 4
+training_iters = 130000
 batch_size = 16
 display_step = 10
 test_step = 900
@@ -32,6 +48,7 @@ img_shape = 224, 224, 3
 n_attr = 9
 dropout = 0.50
 pretrain_batch = 10
+
 
 dev = 0.01
 np.random.seed((hash(np) + hash(monotonic())) % 2**16)
@@ -69,7 +86,7 @@ def one_poselet(X, conv_layers, poselet_id):
     # Reshape input picture
     data_in = convolitions(X, conv_layers, poselet_id)
     # Fully connected layer
-    fc_size = 224 #576
+    fc_size = 1024
     data_size = np.prod(data_in.get_shape().as_list()[1:])
     w = tf.Variable(tf.truncated_normal([data_size, fc_size], stddev=dev),\
             name="fc1_W_%d" % poselet_id)
@@ -84,18 +101,24 @@ def conv_net(X, conv_layers):
     fc_poselets = []
     for i in range(X.get_shape().as_list()[1]):
         fc_poselets.append(one_poselet(X[:,i,...], conv_layers, i))
-    dense1 = tf.concat(axis=1, values=fc_poselets)
-    
-    
-    fc2_size = 128
-    w = tf.Variable(tf.truncated_normal([dense1.get_shape().as_list()[1], fc2_size], \
-        stddev=dev), name="fc2_W")
-    b = tf.Variable(tf.constant(dev, shape=[fc2_size]), name="fc2_b")
-    dense2 = tf.nn.relu(tf.add(tf.matmul(dense1, w), b))
-    dense2 = tf.nn.dropout(dense2, keep_prob)
-    w = tf.Variable(tf.truncated_normal([fc2_size, n_attr], stddev=dev), name="fc3_W")
-    b = tf.Variable(tf.constant(dev, shape=[n_attr]), name="fc3_b")
-    return tf.add(tf.matmul(dense2, w), b) #, dense1, dense2
+    return fc_poselets
+
+
+def fc_net(dense1):
+    res = []
+    fc2_size = 256
+    for i in range(n_attr):
+        w = tf.Variable(tf.truncated_normal([dense1.get_shape().as_list()[1], fc2_size], \
+            stddev=dev), name="fc2_W_%d" % i)
+        b = tf.Variable(tf.constant(dev, shape=[fc2_size]), name="fc2_b_%d" % i)
+        dense2 = tf.nn.relu(tf.add(tf.matmul(dense1, w), b))
+        dense2 = tf.nn.dropout(dense2, keep_prob)
+        w = tf.Variable(tf.truncated_normal([fc2_size, 1], stddev=dev), 
+                        name="fc3_W_%d" % i)
+        b = tf.Variable(tf.constant(dev, shape=[1]), name="fc3_b_%d" % i)
+        res.append(tf.add(tf.matmul(dense2, w), b)) #, dense1, dense2
+    return tf.concat(axis=1, values=res)
+        
     """
     outs = []
     for i in range(n_attr):
@@ -130,52 +153,69 @@ conv_layers = [
 ]
 
 #Load data
-try:
-    data = huge_load('data.dump')
-except:
-    data = AttributesDataset(dataset_dir, img_shape[:2], n_attr)
-    huge_dump(data, 'data.dump')
-x = tf.placeholder(tf.float32, [None, *data.train.x[0].shape])
+# Modes:
+# 1. load ith poselet, then train
+# 2. merge all poselets, and train full classifier
+#Usage:
+# convolitional_network.py [i]
+x = None
 y = tf.placeholder(tf.float32, [None, n_attr])
-
-data.train = dataset(None, data.train.y)
-data.test = dataset(None, data.test.y)
-
-print("Dataset:")
-print("%d train examples, %d test" % (len(data.train.y), len(data.test.y)))  
-# tf Graph input
 keep_prob = tf.placeholder(tf.float32) #dropout (keep probability)
-rgb_subt = tf.constant([123.68, 116.779, 103.939], dtype=tf.float32, \
-                        shape=[1, 1, 1, 3], name='rgb_subt')
-        
+data = None
 
-vggw = np.load(vgg_weights_filename)
-print("vgg weights loaded")
+if train_poselet_id is None:
+    merged_poselets_dump = 'merged_p.dump'
+    if False and path.isfile(merged_poselets_dump):
+        data = huge_load(merged_poselets_dump)
+    else:
+        data = merge_poselets(n_poselets, path.join(dataset_dir, precalc_fc_pattern))
+        huge_dump(data, merged_poselets_dump)
+    px = tf.placeholder(tf.float32, [None, *data.train.px[0].shape])
+    dense1 = px
+else:
+    data_dump = path.join(dataset_dir, 'data%d.dump' % train_poselet_id)
+    if path.isfile(data_dump):
+        data = huge_load(data_dump)
+    else:
+        data = AttributesDataset(dataset_dir, img_shape[:2], n_attr, poselet_id=train_poselet_id)
+        huge_dump(data, data_dump)
+    x = tf.placeholder(tf.float32, [None, *data.train.x[0].shape])
+    print("x.shape =", data.train.x.shape)
 
-X = tf.subtract(x, rgb_subt)
-x_poselets = []
-assigned = []
-with tf.variable_scope("preconv", reuse=None):
-    for i in range(X.get_shape().as_list()[1]):
-        x_poselets.append(tf.expand_dims( \
-            convolitions(X[:,i,...], pretrained_conv_layers, None), 1))
-with tf.variable_scope("preconv", reuse=True):
-    for conv_block in pretrained_conv_layers:
-        for j, (i, r, c, d_out) in enumerate(conv_block):
-            name = "conv%d_%d" % (i, j + 1)
-            asg_b = tf.get_variable(name + '_b_%s' % str(None)).assign(vggw[name + '_b'])
-            asg_W = tf.get_variable(name + '_W_%s' % str(None)).assign(vggw[name + '_W'])
-            assigned += [asg_b, asg_W]
+    print("Dataset:")
+    print("%d train examples, %d test" % (len(data.train.y), len(data.test.y)))  
+    # tf Graph input
+    rgb_subt = tf.constant([123.68, 116.779, 103.939], dtype=tf.float32, \
+                            shape=[1, 1, 1, 3], name='rgb_subt')
+            
 
-pre_conv = tf.concat(axis=1, values=x_poselets)
-print("pre_conv shape: ", pre_conv.get_shape().as_list())
+    vggw = np.load(vgg_weights_filename)
+    print("vgg weights loaded")
+
+    X = tf.subtract(x, rgb_subt)
+    x_poselets = []
+    assigned = []
+    with tf.variable_scope("preconv", reuse=None):
+        for i in range(X.get_shape().as_list()[1]):
+            x_poselets.append(tf.expand_dims( \
+                convolitions(X[:,i,...], pretrained_conv_layers, None), 1))
+    with tf.variable_scope("preconv", reuse=True):
+        for conv_block in pretrained_conv_layers:
+            for j, (i, r, c, d_out) in enumerate(conv_block):
+                name = "conv%d_%d" % (i, j + 1)
+                asg_b = tf.get_variable(name + '_b_%s' % str(None)).assign(vggw[name + '_b'])
+                asg_W = tf.get_variable(name + '_W_%s' % str(None)).assign(vggw[name + '_W'])
+                assigned += [asg_b, asg_W]
+
+    pre_conv = tf.concat(axis=1, values=x_poselets)
+    print("pre_conv shape: ", pre_conv.get_shape().as_list())
+    px = tf.placeholder(tf.float32, pre_conv.get_shape().as_list())
+    fc_poselets = conv_net(px, conv_layers)
+    dense1 = tf.concat(axis=1, values=fc_poselets)
 
 
-px = tf.placeholder(tf.float32, pre_conv.get_shape().as_list())
-
-# Construct model
-pred0 = conv_net(px, conv_layers)
-
+pred0 = fc_net(dense1)
+print("out shape:", pred0.get_shape().as_list())
 # Define loss and optimizer
 cost = tf.reduce_mean(tf.multiply(tf.nn.sigmoid_cross_entropy_with_logits(\
             logits=pred0, labels=y),\
@@ -210,9 +250,9 @@ def apply_on_all_data(sess, graph, ph, data, batch_size=10):
     
 
     
-def test_and_calc_mAP(sess, xy, d):
+def test_and_calc_mAP(sess, xy):
     print("Testing..", end='')
-    res_pred = apply_on_all_data(sess, pred, px, d)
+    res_pred = apply_on_all_data(sess, pred, px, xy.px)
     res_pred.dump("res_pred.dump")
     mAP = 0.0
     labels = xy.y
@@ -224,9 +264,6 @@ def test_and_calc_mAP(sess, xy, d):
     mAP /= n_attr
     return mAP
 
-
-precalc_train = huge_load('precalc_train.dump')
-precalc_test = huge_load('precalc_test.dump')
 
 def test(step_i):  
     m = np.power(wd_r / wd_l, 1.0 / steps)
@@ -254,25 +291,34 @@ def test(step_i):
         print("Glob init.")
         sess.run(tf.global_variables_initializer())
         print("Assign pretrained.")
-        for asg in assigned:
-            sess.run(asg)
         print("Session started.")
         step = 1
-        """
-        try:
-            precalc_train = huge_load('precalc_train.dump')
-        except:
-            precalc_train = apply_on_all_data(sess, pre_conv, x, 
-                                            data.train.x, batch_size=pretrain_batch)
-            huge_dump(precalc_train, 'precalc_train.dump')
-        try:
-            precalc_test = huge_load('precalc_test.dump')
-        except:
-            precalc_test = apply_on_all_data(sess, pre_conv, x, 
-                                            data.test.x, batch_size=pretrain_batch)
-            huge_dump(precalc_test, 'precalc_test.dump')
-        """
-        bg = BatchGenerator(precalc_train, data.train.y)
+        if train_poselet_id is None:
+            bg = BatchGenerator(data.train.px, data.train.y)
+        else:
+            for asg in assigned:
+                sess.run(asg)
+            pretrain_dump = path.join(dataset_dir, 'precalc_train%d.dump' % train_poselet_id)
+            pretest_dump = path.join(dataset_dir, 'precalc_test%d.dump' % train_poselet_id)
+            
+            if path.isfile(pretrain_dump):
+                precalc_train = huge_load(pretrain_dump)
+            else:
+                precalc_train = apply_on_all_data(sess, pre_conv, x, 
+                                                data.train.x, batch_size=pretrain_batch)
+                huge_dump(precalc_train, pretrain_dump)
+            del data.train.x
+            data.train.px = precalc_train
+            if path.isfile(pretest_dump):
+                precalc_test = huge_load(pretest_dump)
+            else:
+                precalc_test = apply_on_all_data(sess, pre_conv, x, 
+                                                data.test.x, batch_size=pretrain_batch)
+                huge_dump(precalc_test, pretest_dump)
+            del data.test.x
+            data.test.px = precalc_test
+        
+            bg = BatchGenerator(precalc_train, data.train.y)
         #for i in range(x.get_shape().as_list()[1]):
         #    print("pre_conv shape: ", pre_conv.get_shape().as_list())
         
@@ -307,9 +353,9 @@ def test(step_i):
                     plt_it1.append(step*batch_size)
                     
                 if step % test_step == 0:
-                    mAP = test_and_calc_mAP(sess, data.test, precalc_test)
+                    mAP = test_and_calc_mAP(sess, data.test)
                     print("Test mAP:", mAP)
-                    mAP_tr = test_and_calc_mAP(sess, data.train, precalc_train)
+                    mAP_tr = test_and_calc_mAP(sess, data.train)
                     print("Train mAP:", mAP_tr)
                     plt_acc.append(mAP)
                     plt_acc_tr.append(mAP_tr)
@@ -318,28 +364,34 @@ def test(step_i):
         except KeyboardInterrupt:
             print("Interrupted")
         
-        plt.plot(plt_it1, plt_y)
-        plt.show()
-        plt.plot(plt_it2, plt_acc)
-        plt.show()
-        plt.plot(plt_it2, plt_acc_tr)
-        plt.show()
+        if train_poselet_id is None:
+            plt.plot(plt_it1, plt_y)
+            plt.show()
+            plt.plot(plt_it2, np.transpose([plt_acc, plt_acc_tr]))
+            plt.ylim(ymin=0.5, ymax=1)
+            plt.show()
         
         print("Optimization Finished!")
         tmp = []
         for v in tf.global_variables():
             tmp.append(v.value().eval())
         huge_dump(tmp, "tmp.dump")
-        mAP = test_and_calc_mAP(sess, data.test, precalc_test)
+        mAP = test_and_calc_mAP(sess, data.test)
         print("Test mAP:", mAP)
-        """
-        print('pred0\n',sess.run(pred0, feed_dict={x: data.test.x[0:4], keep_prob: 1. }))
-        print('d1\n',sess.run(d1, feed_dict={x: data.test.x[0:4], keep_prob: 1. }))
-        print('d2\n',sess.run(d2, feed_dict={x: data.test.x[0:4], keep_prob: 1. }))
-        """
-        #print(result)
-        #print(data.test.y[:batch_size])
         
+        
+        if train_poselet_id is not None:
+            prefc_dump = path.join(dataset_dir, precalc_fc_pattern % train_poselet_id)
+            precalc_train_fc = apply_on_all_data(sess, fc_poselets[0], px, 
+                                            precalc_train, batch_size=pretrain_batch)
+            data.train.px = precalc_train_fc
+            del precalc_train
+            precalc_test_fc = apply_on_all_data(sess, fc_poselets[0], px, 
+                                            precalc_test, batch_size=pretrain_batch)
+            data.test.px = precalc_test_fc
+            huge_dump(data, prefc_dump)
+        
+            print("%dth poselet outputs dumped to: %s" % (train_poselet_id, prefc_dump))
     return -mAP
 
 if False:
@@ -349,10 +401,28 @@ if False:
     print("result:", opt_res.x)
 else:
     test(0)
-#Test mAP: 0.766681925364
-#lr = 5e-05 wd = 0.0714664099481
-# 0.730441004053
-# 0.76?
-#mAP:
-#skel_3*9   0.6540
-#9_0.05     0.6
+# learning_rate = 1e-5 * 5
+# weight_decay = 1e-2 * 4
+# 9 * fc_2
+#1th attr: 86.51%
+#2th attr: 75.28%
+#3th attr: 50.57%
+#4th attr: 84.05%
+#5th attr: 53.04%
+#6th attr: 87.17%
+#7th attr: 81.75%
+#8th attr: 82.72%
+#9th attr: 96.80%
+#Test mAP: 0.775439906957
+# max 0.777 - 300k iters
+#1th attr: 86.36%
+#2th attr: 75.28%
+#3th attr: 52.23%
+#4th attr: 84.48%
+#5th attr: 52.80%
+#6th attr: 86.89%
+#7th attr: 82.68%
+#8th attr: 82.08%
+#9th attr: 96.80%
+#Test mAP: 0.777348474592
+

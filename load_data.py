@@ -9,7 +9,6 @@ from skimage.draw import line_aa, circle_perimeter_aa
 import json
 import pickle
 
-dataset = namedtuple('dataset', ('x', 'y'))
 widths = [
     1.0,
     0.5,
@@ -40,6 +39,7 @@ def huge_dump(obj, filename):
     f = open(filename, 'wb')
     pickle.dump(obj, f, protocol=4)
     f.close()
+    print("data dumped to %s", filename)
     
     
 def huge_load(filename):
@@ -80,7 +80,7 @@ def dist(p1, p2):
 def batch_show(batch):
     shape = batch.shape[2:]
     batch = np.reshape(batch, (-1, *shape))
-    n = int(np.sqrt(len(batch))) + 1
+    n = int(np.ceil(np.sqrt(len(batch))))
     img = np.zeros((n * shape[0], n * shape[1], shape[2]), dtype=batch.dtype)
     for k in range(len(batch)):
         i, j = k // n, k % n
@@ -147,8 +147,61 @@ def symm_vert(x):
             res.append(img[:, ::-1])
     return res[0] if not_list else res
     
+
+class AttributesDataset:
+    def __init__(self, datadir, shape, n_attr, poselet_id=None):
+        self.train = load_data_atr(path.join(datadir, 'train'), shape, n_attr, poselet_id=poselet_id)
+        self.test = load_data_atr(path.join(datadir, 'test'), shape, n_attr, poselet_id=poselet_id, is_test=True)
+
+
+class EmptyDataset:
+    def __init__(self):
+        self.train = None
+        self.test = None
+
+
+class Dataset:
+    def __init__(self, x, y, names, px=None):
+        self.x = x
+        self.y = y
+        self.px = px
+        self.names = names
+
+
+def merge_poselets_ds(ds):
+    name_to_i = list()
+    names = set()
+    for d in ds:
+        names = names.union(set(d.names))
+        name_to_i.append(dict(zip(d.names, range(len(d.names)))))
+    names = sorted(list(names))
+    respx = np.zeros((len(names), len(ds)) + ds[0].px.shape[1:], dtype=ds[0].px.dtype)
+    resy = -np.ones((len(names), ) + ds[0].y.shape[1:], dtype=ds[0].y.dtype)
+    print("merging poselets:", respx.shape)
+    for i, name in enumerate(names):
+        for di in range(len(ds)):
+            if name in name_to_i[di]:
+                respx[i, di] = ds[di].px[name_to_i[di][name]]
+                assert(resy[i][0] == -1 or np.all(resy[i] == ds[di].y[name_to_i[di][name]]))
+                resy[i] = ds[di].y[name_to_i[di][name]]
+    assert(np.all(resy != -1))
+    return Dataset(None, resy, names, px=respx.reshape((len(respx), -1)))
+
+
+def merge_poselets(n_poselets, precalc_fc_pattern):
+    d_train = list()
+    d_test = list()
+    ds = EmptyDataset()
+    for i in range(0, n_poselets):
+        d = huge_load(precalc_fc_pattern % i)
+        d_train.append(d.train)
+        d_test.append(d.test)
+    ds.train = merge_poselets_ds(d_train)
+    ds.test = merge_poselets_ds(d_test)
+    return ds         
     
-def load_data_atr(datadir, shape, n_attr, is_test=False):
+
+def load_data_atr(datadir, shape, n_attr, poselet_id=None, is_test=False):
     f = open(path.join(datadir, 'labels.txt'), 'r')
     rows = f.readlines()
     f.close()
@@ -158,7 +211,7 @@ def load_data_atr(datadir, shape, n_attr, is_test=False):
     f.close()
     stats = calc_stats(joints_dict)
     n = len(rows)
-    x, y = list(), list()
+    x, y, names = list(), list(), list()
     for i, row in enumerate(rows):
         fields = [field.strip() for field in row.split()]
         assert(len(fields) == 1 + 4 + n_attr)
@@ -167,14 +220,14 @@ def load_data_atr(datadir, shape, n_attr, is_test=False):
         roi = list(map(float, fields[1:5]))
         if roi[0] != roi[0]:
             continue
-        if True:
+        if False:
             subimg = cv2.resize(subrect(img, roi), shape)
             x.append([subimg])
         elif False:
             subimg1 = cv2.resize(subrect(img, (roi[0], roi[1], roi[2], roi[3] / 2)), shape)
             subimg2 = cv2.resize(subrect(img, (roi[0], roi[1] + roi[3] / 2, roi[2], roi[3] / 2)), shape)
             x.append([subimg1, subimg2])
-        elif False:
+        elif True:
             subimg = cv2.resize(subrect(img, roi), shape)
             joints = joints_dict[fields[0]][0]
             x.append([subimg] + extract_poselets(img, joints, shape, stats=stats))
@@ -182,17 +235,26 @@ def load_data_atr(datadir, shape, n_attr, is_test=False):
             x.pop()
             print('pop %s' % fields[0])
         else:
+            if poselet_id is not None:
+                x[-1] = x[-1][poselet_id:poselet_id + 1]
+                if np.all(x[-1][0] == 0):
+                    x.pop()
+                    print('pop_%d %s' % (poselet_id, fields[0]))
+                    continue
             y.append(list(map(float, fields[5:])))
+            names.append(fields[0])
             if not is_test:
                 x.append(symm_vert(x[-1]))
                 y.append(y[-1])
+                names.append(fields[0] + ".s")
         
     y = (np.array(y, dtype=np.float32) + 1) * 0.5
     from sys import getsizeof
     print(getsizeof(x))
-    xy = dataset(np.array(x, dtype=x[0][0].dtype), y)
+    xy = Dataset(np.array(x, dtype=x[0][0].dtype), y, names)
     print(getsizeof(xy.x), xy.x.shape, xy.x.dtype)
     return xy
+
 
 def draw_joints(img, pts):
     for i in range(len(pts)):
@@ -209,12 +271,6 @@ def draw_joints(img, pts):
 def cvt(img):
     if img.dtype == np.uint8:
         return img.astype(np.float32) / 255
-
-
-class AttributesDataset:
-    def __init__(self, datadir, shape, n_attr):
-        self.train = load_data_atr(path.join(datadir, 'train'), shape, n_attr)
-        self.test = load_data_atr(path.join(datadir, 'test'), shape, n_attr, is_test=True)
 
 
 class BatchGenerator:
