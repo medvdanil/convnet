@@ -301,20 +301,24 @@ def test(step_i):
             pretrain_dump = path.join(dataset_dir, 'precalc_train%d.dump' % train_poselet_id)
             pretest_dump = path.join(dataset_dir, 'precalc_test%d.dump' % train_poselet_id)
             
-            if path.isfile(pretrain_dump):
-                precalc_train = huge_load(pretrain_dump)
-            else:
-                precalc_train = apply_on_all_data(sess, pre_conv, x, 
-                                                data.train.x, batch_size=pretrain_batch)
-                huge_dump(precalc_train, pretrain_dump)
+            #if path.isfile(pretrain_dump):
+                #precalc_train = huge_load(pretrain_dump)
+            #else:
+                #precalc_train = apply_on_all_data(sess, pre_conv, x, 
+                                                #data.train.x, batch_size=pretrain_batch)
+                #huge_dump(precalc_train, pretrain_dump)
+            precalc_train = apply_on_all_data(sess, pre_conv, x, 
+                                            data.train.x, batch_size=pretrain_batch)
             del data.train.x
             data.train.px = precalc_train
-            if path.isfile(pretest_dump):
-                precalc_test = huge_load(pretest_dump)
-            else:
-                precalc_test = apply_on_all_data(sess, pre_conv, x, 
-                                                data.test.x, batch_size=pretrain_batch)
-                huge_dump(precalc_test, pretest_dump)
+            #if path.isfile(pretest_dump):
+                #precalc_test = huge_load(pretest_dump)
+            #else:
+                #precalc_test = apply_on_all_data(sess, pre_conv, x, 
+                                                #data.test.x, batch_size=pretrain_batch)
+                #huge_dump(precalc_test, pretest_dump)
+            precalc_test = apply_on_all_data(sess, pre_conv, x, 
+                                            data.test.x, batch_size=pretrain_batch)
             del data.test.x
             data.test.px = precalc_test
         
