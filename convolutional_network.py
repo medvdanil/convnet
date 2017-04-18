@@ -341,7 +341,28 @@ def test(step_i):
                 print(summ)
                 """
                 # Fit training using batch data
-                sess.run(optimizer, feed_dict={px: batch_xs, y: batch_ys,
+                sess.run(optimiz9 * fc_2
+#1th attr: 86.51%
+#2th attr: 75.28%
+#3th attr: 50.57%
+#4th attr: 84.05%
+#5th attr: 53.04%
+#6th attr: 87.17%
+#7th attr: 81.75%
+#8th attr: 82.72%
+#9th attr: 96.80%
+#Test mAP: 0.775439906957
+# max 0.777 - 300k iters
+#1th attr: 86.36%
+#2th attr: 75.28%
+#3th attr: 52.23%
+#4th attr: 84.48%
+#5th attr: 52.80%
+#6th attr: 86.89%
+#7th attr: 82.68%
+#8th attr: 82.08%
+#9th attr: 96.80%
+#Test mAP: 0.777348474592er, feed_dict={px: batch_xs, y: batch_ys,
                                                keep_prob: dropout})
                 if step % display_step == 0:
                     loss = sess.run(cost, feed_dict={px: batch_xs, y: batch_ys, keep_prob: 1.})
@@ -407,26 +428,17 @@ else:
     test(0)
 # learning_rate = 1e-5 * 5
 # weight_decay = 1e-2 * 4
-# 9 * fc_2
-#1th attr: 86.51%
-#2th attr: 75.28%
-#3th attr: 50.57%
-#4th attr: 84.05%
-#5th attr: 53.04%
-#6th attr: 87.17%
-#7th attr: 81.75%
-#8th attr: 82.72%
-#9th attr: 96.80%
-#Test mAP: 0.775439906957
-# max 0.777 - 300k iters
-#1th attr: 86.36%
-#2th attr: 75.28%
-#3th attr: 52.23%
-#4th attr: 84.48%
-#5th attr: 52.80%
-#6th attr: 86.89%
-#7th attr: 82.68%
-#8th attr: 82.08%
-#9th attr: 96.80%
-#Test mAP: 0.777348474592
+# 
+#1th attr: 92.55%
+#2th attr: 85.67%
+#3th attr: 87.43%
+#4th attr: 93.20%
+#5th attr: 70.13%
+#6th attr: 96.52%
+#7th attr: 93.85%
+#8th attr: 91.18%
+#9th attr: 98.77%
+#Test mAP: 89.92%
+
+
 

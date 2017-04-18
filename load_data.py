@@ -67,7 +67,7 @@ def subrect(img, xywh):
     return cv2.getRectSubPix(img, (w, h), (x, y))
 
 
-def subimg(img, roi):
+def subimg_roi(img, roi):
     x = np.mean(roi[2:4])
     y = np.mean(roi[0:2])
     w = roi[3] - roi[2]
@@ -145,7 +145,7 @@ def calc_stats(joints_dict):
     
 def extract_poselets_old(img, pts, shape, stats=None):
     res = []
-    dists = np.zeros(len(pairs), np.float32)
+    dists = np.zeros(len(pairs), img.dtype)
     for i, (v1, v2, t) in enumerate(pairs):
         dists[i] = dist2(pts[v1], pts[v2])
     dists = np.sqrt(dists)
@@ -185,7 +185,7 @@ def get_limbs(img, figure, shape):
         p1 = v[:2]
         p2 = v[2:4]
         if p1[0] < 0:
-            res.append(np.zeros(shape + img.shape[2:], dtype=np.float32))
+            res.append(np.zeros(shape + img.shape[2:], dtype=img.dtype))
             continue
         res.append(norm_limb(img, figure, shape, p1, p2))
     return res
@@ -197,17 +197,23 @@ def get_torso(img, figure, shape):
         if figure[i][0] >= 0:
             idxes.append(i)
     if len(idxes) == 0:
-        return np.zeros(shape + img.shape[2:], dtype=np.float32)
+        return np.zeros(shape + img.shape[2:], dtype=img.dtype)
     p1 = figure[idxes[0], :2]
     p2 = figure[idxes, 2:4].mean(axis=0)
     return norm_limb(img, figure, shape, p1, p2)
 
 
 def extract_poselets(img, figure, shape):
+    if figure is None:
+        return [np.zeros(shape + img.shape[2:], dtype=img.dtype)] * 10
     head_roi = get_head_roi(figure)
-    res = [cv2.resize(subimg(img, head_roi), shape)]
+    if head_roi[1] >= 0:
+        res = [cv2.resize(subimg_roi(img, head_roi), shape)]
+    else:
+        res = [np.zeros(shape + img.shape[2:], dtype=img.dtype)]
     res += get_limbs(img, figure, shape)
     res.append(get_torso(img, figure, shape))
+    #batch_show(np.array([res]))
     return res  
     
     
@@ -303,8 +309,8 @@ def get_rois(ann):
     rois = np.array([[1e9, -1, 1e9, -1]] * len(ann)) #t:b, l:r
     for n in range(len(ann)):
         rois[n] = get_head_roi(ann[n])
-        for i in range(len(ann[n][i])):
-            if ann[n][i] < 0:
+        for i in range(len(ann[n])):
+            if ann[n][i][0] < 0:
                 continue
             r = np.zeros(2)
             c = np.zeros(2)
@@ -325,23 +331,27 @@ def int_square(pos1, shape1, pos2, shape2):
 
 def isec_norm(roi1, roi2):
     isec1 = max(roi1[0], roi2[0]), max(roi1[2], roi2[2])
-    isec2 = min(roi1[1], roi2[1], isec1[0]), min(roi1[3], roi2[3], isec1[1])
+    isec2 = max(min(roi1[1], roi2[1]), isec1[0]), max(min(roi1[3], roi2[3]), isec1[1])
     un1 = min(roi1[0], roi2[0]), min(roi1[2], roi2[2])
     un2 = max(roi1[1], roi2[1]), max(roi1[3], roi2[3])
     return np.prod(np.subtract(isec2, isec1)) / np.prod(np.subtract(un2, un1))
 
 
-def select_figure(figures, label_roi):
+def select_figure(figures, label_xywh):
     if len(figures) == 0:
         return None
+    label_roi = [label_xywh[1], label_xywh[1] + label_xywh[3]]
+    label_roi += [label_xywh[0], label_xywh[0] + label_xywh[2]]
     maxi = 0
     maxv = 0
     rois = get_rois(figures)
     for i, roi in enumerate(rois):
         v = isec_norm(roi, label_roi)
+        #print(i, roi, v)
         if v > maxv:
             maxv = v
             maxi = i
+    #print("maxvv", maxv)
     return figures[maxi]
     
 
@@ -354,7 +364,7 @@ def load_data_atr(datadir, shape, n_attr, poselet_id=None, is_test=False):
     #joints_dict = json.load(f)
     #f.close()
     joints_dict = np.load(path.join(datadir, 'annotation.npz'))
-    stats = calc_stats(joints_dict)
+    #stats = calc_stats(joints_dict)
     n = len(rows)
     x, y, names = list(), list(), list()
     for i, row in enumerate(rows):
@@ -375,7 +385,9 @@ def load_data_atr(datadir, shape, n_attr, poselet_id=None, is_test=False):
         elif True:
             subimg = cv2.resize(subrect(img, roi), shape)
             joints = select_figure(joints_dict[fields[0]], roi)
-            x.append([subimg] + extract_poselets(img, joints, shape, stats=stats))
+            x.append([subimg] + extract_poselets(img, joints, shape))
+            #print(fields[0])
+            #batch_show(np.array([x[-1]], dtype=np.uint8))
         if x[-1] is None:
             x.pop()
             print('pop %s' % fields[0])
@@ -393,7 +405,7 @@ def load_data_atr(datadir, shape, n_attr, poselet_id=None, is_test=False):
                 y.append(y[-1])
                 names.append(fields[0] + ".s")
         
-    y = (np.array(y, dtype=np.float32) + 1) * 0.5
+    y = (np.array(y, dtype=img.dtype) + 1) * 0.5
     from sys import getsizeof
     print(getsizeof(x))
     xy = Dataset(np.array(x, dtype=x[0][0].dtype), y, names)
@@ -415,7 +427,7 @@ def draw_joints(img, pts):
 
 def cvt(img):
     if img.dtype == np.uint8:
-        return img.astype(np.float32) / 255
+        return img.astype(img.dtype) / 255
 
 
 class BatchGenerator:
