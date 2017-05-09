@@ -37,13 +37,14 @@ limb_idxes = [2, 3, 7, 8, 4, 5, 10, 11]
 torso_idxes = [6, 9]
 head_size_k = 1.9
 extend_k = 0.1
+roi_in_label = False
 
 def huge_dump(obj, filename):
     #joblib.dump(obj, filename, compress=9)
     f = open(filename, 'wb')
     pickle.dump(obj, f, protocol=4)
     f.close()
-    print("data dumped to %s", filename)
+    print("data dumped to %s" % filename)
     
     
 def huge_load(filename):
@@ -232,9 +233,14 @@ def symm_vert(x):
     
 
 class AttributesDataset:
-    def __init__(self, datadir, shape, n_attr, poselet_id=None):
-        self.train = load_data_atr(path.join(datadir, 'train'), shape, n_attr, poselet_id=poselet_id)
-        self.test = load_data_atr(path.join(datadir, 'test'), shape, n_attr, poselet_id=poselet_id, is_test=True)
+    def __init__(self, datadir, shape, poselet_id=None, ban_list=None):
+        if ban_list is None:
+            self.train, self.ban_attrs = load_data_atr(path.join(datadir, 'train'), shape, None, poselet_id=poselet_id)
+        else:
+            self.ban_attrs = ban_list
+            self.train = load_data_atr(path.join(datadir, 'train'), shape, self.ban_attrs, poselet_id=poselet_id)
+        self.n_attr = self.train.y.shape[1]
+        self.test = load_data_atr(path.join(datadir, 'test'), shape, self.ban_attrs, poselet_id=poselet_id, is_test=True)
 
 
 class EmptyDataset:
@@ -251,36 +257,80 @@ class Dataset:
         self.names = names
 
 
-def merge_poselets_ds(ds):
+def get_attr_names(fname):
+    attr2idx = dict()
+    attr_list = []
+    f = open(fname)
+    multi_names = f.readline().strip().split(', ')
+    multi_colors = f.readline().strip().split(', ')
+    cnt = 0
+    for name in multi_names:
+        for color in multi_colors:
+            attr2idx[name + color] = cnt
+            attr_list.append(name + color)
+            cnt += 1
+    for name in f.readlines():
+        attr2idx[name.strip()] = cnt
+        attr_list.append(name.strip())
+        cnt += 1
+    f.close()
+    return attr2idx, attr_list
+
+
+def get_selected_attrs(fname):
+    attr_list = []
+    f = open(fname)
+    for name in f.readlines():
+        attr_list.append(name.strip())
+    f.close()
+    return attr_list    
+
+
+def merge_poselets_ds(ds, ban_lists, req_ban_list=None):
     name_to_i = list()
     names = set()
+    b = ban_lists[0].copy()
+    for ban_attrs in ban_lists:
+        b |= ban_attrs
+    if req_ban_list is not None:
+        b = req_ban_list
+    nb = -b
+    n_attr = np.count_nonzero(nb)
+    print("n_attr", n_attr)
+    sub_ba = []
+    for ban_attrs in ban_lists:
+        sub_ba.append(nb[-ban_attrs])
     for d in ds:
         names = names.union(set(d.names))
         name_to_i.append(dict(zip(d.names, range(len(d.names)))))
     names = sorted(list(names))
     respx = np.zeros((len(names), len(ds)) + ds[0].px.shape[1:], dtype=ds[0].px.dtype)
-    resy = -np.ones((len(names), ) + ds[0].y.shape[1:], dtype=ds[0].y.dtype)
+    resy = -np.ones((len(names), n_attr) + ds[0].y.shape[2:], dtype=ds[0].y.dtype)
     print("merging poselets:", respx.shape)
     for i, name in enumerate(names):
         for di in range(len(ds)):
             if name in name_to_i[di]:
                 respx[i, di] = ds[di].px[name_to_i[di][name]]
-                assert(resy[i][0] == -1 or np.all(resy[i] == ds[di].y[name_to_i[di][name]]))
-                resy[i] = ds[di].y[name_to_i[di][name]]
+                assert(resy[i][0] == -1 or np.all(resy[i] == ds[di].y[name_to_i[di][name]][sub_ba[di]]))
+                resy[i] = ds[di].y[name_to_i[di][name]][sub_ba[di]]
     assert(np.all(resy != -1))
-    return Dataset(None, resy, names, px=respx.reshape((len(respx), -1)))
+    return Dataset(None, resy, names, px=respx.reshape((len(respx), -1))), b
 
 
-def merge_poselets(n_poselets, precalc_fc_pattern):
+def merge_poselets(n_poselets, precalc_fc_pattern, ban_list=None):
     d_train = list()
     d_test = list()
+    b = list()
     ds = EmptyDataset()
     for i in range(0, n_poselets):
         d = huge_load(precalc_fc_pattern % i)
         d_train.append(d.train)
         d_test.append(d.test)
-    ds.train = merge_poselets_ds(d_train)
-    ds.test = merge_poselets_ds(d_test)
+        b.append(d.ban_attrs)
+    ds.train, ds.ban_attrs = merge_poselets_ds(d_train, b, req_ban_list=ban_list)
+    ds.test, ba = merge_poselets_ds(d_test, b, req_ban_list=ban_list)
+    ds.n_attr = np.count_nonzero(-ds.ban_attrs)
+    assert(np.all(ds.ban_attrs == ba))
     return ds         
 
 
@@ -295,6 +345,7 @@ def mean_edge(figure):
         return -1
     return s / n
 
+
 def get_head_roi(figure):
     head_pts = np.reshape(figure, (-1, 2))
     head_pts = head_pts[-9:]
@@ -304,6 +355,7 @@ def get_head_roi(figure):
     center = head_pts.mean(axis=0)
     shape = np.array((mean_edge(figure) * head_size_k,) * 2)
     return center[0] - shape[0] / 2, center[0] + shape[0] / 2, center[1] - shape[1] / 2, center[1] + shape[1] / 2
+
 
 def get_rois(ann):            
     rois = np.array([[1e9, -1, 1e9, -1]] * len(ann)) #t:b, l:r
@@ -355,7 +407,7 @@ def select_figure(figures, label_xywh):
     return figures[maxi]
     
 
-def load_data_atr(datadir, shape, n_attr, poselet_id=None, is_test=False):
+def load_data_atr(datadir, shape, ban_attrs, poselet_id=None, is_test=False):
     f = open(path.join(datadir, 'labels.txt'), 'r')
     rows = f.readlines()
     f.close()
@@ -366,22 +418,28 @@ def load_data_atr(datadir, shape, n_attr, poselet_id=None, is_test=False):
     joints_dict = np.load(path.join(datadir, 'annotation.npz'))
     #stats = calc_stats(joints_dict)
     n = len(rows)
+    attr_stats = None
     x, y, names = list(), list(), list()
     for i, row in enumerate(rows):
         fields = [field.strip() for field in row.split()]
-        assert(len(fields) == 1 + 4 + n_attr)
+        # assert(len(fields) == 1 + 4 * int(roi_in_label) + n_attr)
         #try:
         img = imread(path.join(datadir, fields[0]))
-        roi = list(map(float, fields[1:5]))
+        atr0 = 4 * int(roi_in_label) + 1
+        if roi_in_label:
+            roi = list(map(float, fields[1:atr0]))
+        else:
+            roi = [0, 0, img.shape[1], img.shape[0]]
         if roi[0] != roi[0]:
             continue
         if False:
             subimg = cv2.resize(subrect(img, roi), shape)
             x.append([subimg])
         elif False:
+            subimg = cv2.resize(subrect(img, roi), shape)
             subimg1 = cv2.resize(subrect(img, (roi[0], roi[1], roi[2], roi[3] / 2)), shape)
             subimg2 = cv2.resize(subrect(img, (roi[0], roi[1] + roi[3] / 2, roi[2], roi[3] / 2)), shape)
-            x.append([subimg1, subimg2])
+            x.append([subimg, subimg1, subimg2])
         elif True:
             subimg = cv2.resize(subrect(img, roi), shape)
             joints = select_figure(joints_dict[fields[0]], roi)
@@ -398,19 +456,39 @@ def load_data_atr(datadir, shape, n_attr, poselet_id=None, is_test=False):
                     x.pop()
                     print('pop_%d %s' % (poselet_id, fields[0]))
                     continue
-            y.append(list(map(float, fields[5:])))
+            labels = list(map(int, fields[atr0:]))
+            labels = (np.array(labels, dtype=np.int32) + 1) // 2
+            y.append(labels)
+            if attr_stats is None:
+                attr_stats = labels.copy()
+            else:
+                attr_stats += labels
             names.append(fields[0])
             if not is_test:
                 x.append(symm_vert(x[-1]))
                 y.append(y[-1])
                 names.append(fields[0] + ".s")
-        
-    y = (np.array(y, dtype=img.dtype) + 1) * 0.5
+    print("attr_stats:", attr_stats)
+    attr_stats.dump('attr_stats.dump')
+    # use banlist or ban attributes which presents < 100
+    ret_ba = False
+    if ban_attrs is None:
+        ban_attrs = attr_stats < 100
+        ret_ba = True
+
+    assert((-ban_attrs).dtype == bool)
+    print("use only:", -ban_attrs)
+    y = np.array(y, dtype=np.float32)
+    huge_dump((y[:100], -ban_attrs), "tmp.dump")
+    y = y[:, -ban_attrs]
     from sys import getsizeof
     print(getsizeof(x))
     xy = Dataset(np.array(x, dtype=x[0][0].dtype), y, names)
     print(getsizeof(xy.x), xy.x.shape, xy.x.dtype)
-    return xy
+    if ret_ba:
+        return xy, ban_attrs
+    else:
+        return xy
 
 
 def draw_joints(img, pts):
@@ -448,3 +526,19 @@ class BatchGenerator:
         self.offset += batch_size - len(self.data)
         p = np.hstack((p, self.order[:self.offset]))
         return self.data[p], self.labels[p]
+
+
+class UniformBatchGen:
+    def __init__(self, data, labels, atr_i):
+        data0 = data[labels[:, atr_i] == 0.0]
+        self.bg0 = BatchGenerator(data0, np.zeros((len(data0), 1)))
+        data1 = data[labels[:, atr_i] == 1.0]
+        self.bg1 = BatchGenerator(data1, np.ones((len(data1), 1)))
+        print("Uniform batches: %d zeros, %d ones" % (len(data0), len(data1)))
+        
+    def next_batch(self, batch_size):
+        data0, lab0 = self.bg0.next_batch(batch_size // 2)
+        data1, lab1 = self.bg1.next_batch(batch_size // 2)
+        return np.vstack((data0, data1)), np.vstack((lab0, lab1))
+
+        
